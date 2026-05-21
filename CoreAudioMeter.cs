@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using Microsoft.Win32;
 
 namespace AudioPttLatch;
 
@@ -21,18 +22,129 @@ public sealed class CoreAudioMeter : IDisposable
     /// </summary>
     public static IReadOnlyList<AudioEndpoint> Enumerate(AudioDeviceKind kind)
     {
+        var endpoints = EnumerateFromRegistry(kind);
+        if (endpoints.Count > 0)
+        {
+            return endpoints;
+        }
+
+        // Registry metadata should normally be available. Keep the COM path as a
+        // fallback for unusual installs where the registry view is not readable.
+        return EnumerateFromCoreAudio(kind);
+    }
+
+    /// <summary>
+    /// Reads endpoint IDs and display names from the Windows MMDevices registry keys.
+    /// </summary>
+    private static IReadOnlyList<AudioEndpoint> EnumerateFromRegistry(AudioDeviceKind kind)
+    {
+        var results = new List<AudioEndpoint>();
+        var flowKey = kind == AudioDeviceKind.Input ? "Capture" : "Render";
+        var path = $@"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\{flowKey}";
+
+        using var baseKey = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
+        using var audioKey = baseKey.OpenSubKey(path);
+        if (audioKey == null)
+        {
+            return results;
+        }
+
+        foreach (var endpointId in audioKey.GetSubKeyNames())
+        {
+            using var endpointKey = audioKey.OpenSubKey(endpointId);
+            if (endpointKey == null || !IsRegistryEndpointActive(endpointKey))
+            {
+                continue;
+            }
+
+            using var propertiesKey = endpointKey.OpenSubKey("Properties");
+            var displayName = BuildRegistryEndpointDisplayName(propertiesKey) ?? endpointId;
+            results.Add(new AudioEndpoint(BuildCoreAudioEndpointId(kind, endpointId), displayName, kind));
+        }
+
+        return results
+            .OrderBy(endpoint => endpoint.Name, StringComparer.CurrentCultureIgnoreCase)
+            .ToArray();
+    }
+
+    /// <summary>
+    /// Converts an MMDevices registry key name into the endpoint ID expected by IMMDeviceEnumerator.GetDevice.
+    /// </summary>
+    private static string BuildCoreAudioEndpointId(AudioDeviceKind kind, string registryEndpointId)
+    {
+        if (registryEndpointId.StartsWith("{0.0.", StringComparison.OrdinalIgnoreCase))
+        {
+            return registryEndpointId;
+        }
+
+        var flowPrefix = kind == AudioDeviceKind.Input ? "{0.0.1.00000000}" : "{0.0.0.00000000}";
+        return $"{flowPrefix}.{registryEndpointId}";
+    }
+
+    /// <summary>
+    /// Determines whether an MMDevices registry endpoint is currently active.
+    /// </summary>
+    private static bool IsRegistryEndpointActive(RegistryKey endpointKey)
+    {
+        return endpointKey.GetValue("DeviceState") is int state && state == DeviceStateActive;
+    }
+
+    /// <summary>
+    /// Builds a descriptive endpoint label from MMDevices property values.
+    /// </summary>
+    private static string? BuildRegistryEndpointDisplayName(RegistryKey? propertiesKey)
+    {
+        if (propertiesKey == null)
+        {
+            return null;
+        }
+
+        var endpointName = ReadRegistryString(propertiesKey, "{a45c254e-df1c-4efd-8020-67d146a850e0},2");
+        var parentDeviceName = ReadRegistryString(propertiesKey, "{b3f8fa53-0004-438e-9003-51a46e139bfc},6")
+            ?? ReadRegistryString(propertiesKey, "{a45c254e-df1c-4efd-8020-67d146a850e0},14");
+
+        if (!string.IsNullOrWhiteSpace(endpointName) &&
+            !string.IsNullOrWhiteSpace(parentDeviceName) &&
+            !string.Equals(endpointName, parentDeviceName, StringComparison.CurrentCultureIgnoreCase))
+        {
+            return $"{endpointName} ({parentDeviceName})";
+        }
+
+        return endpointName ?? parentDeviceName;
+    }
+
+    /// <summary>
+    /// Reads and trims one registry string value.
+    /// </summary>
+    private static string? ReadRegistryString(RegistryKey propertiesKey, string valueName)
+    {
+        return propertiesKey.GetValue(valueName) is string value && !string.IsNullOrWhiteSpace(value)
+            ? value.Trim()
+            : null;
+    }
+
+    /// <summary>
+    /// Returns all active input or output endpoints using the Core Audio enumerator.
+    /// </summary>
+    private static IReadOnlyList<AudioEndpoint> EnumerateFromCoreAudio(AudioDeviceKind kind)
+    {
         var results = new List<AudioEndpoint>();
         var enumerator = CreateEnumerator();
         IMMDeviceCollection? collection = null;
+        IntPtr collectionPointer = IntPtr.Zero;
 
         try
         {
-            ThrowIfFailed(enumerator.EnumAudioEndpoints(ToFlow(kind), DeviceStateActive, out collection));
+            // Some machines/drivers are picky about automatic COM interface marshalling
+            // here. Request the raw pointer first, then wrap it ourselves.
+            ThrowIfFailed(enumerator.EnumAudioEndpoints(ToFlow(kind), DeviceStateActive, out collectionPointer));
+            collection = (IMMDeviceCollection)Marshal.GetObjectForIUnknown(collectionPointer);
             ThrowIfFailed(collection.GetCount(out var count));
 
             for (var i = 0; i < count; i++)
             {
-                ThrowIfFailed(collection.Item(i, out var device));
+                ThrowIfFailed(collection.Item(i, out var devicePointer));
+                var device = (IMMDevice)Marshal.GetObjectForIUnknown(devicePointer);
                 try
                 {
                     ThrowIfFailed(device.GetId(out var id));
@@ -41,6 +153,7 @@ public sealed class CoreAudioMeter : IDisposable
                 finally
                 {
                     Marshal.ReleaseComObject(device);
+                    Marshal.Release(devicePointer);
                 }
             }
         }
@@ -49,6 +162,11 @@ public sealed class CoreAudioMeter : IDisposable
             if (collection != null)
             {
                 Marshal.ReleaseComObject(collection);
+            }
+
+            if (collectionPointer != IntPtr.Zero)
+            {
+                Marshal.Release(collectionPointer);
             }
 
             Marshal.ReleaseComObject(enumerator);
@@ -220,7 +338,7 @@ public sealed class CoreAudioMeter : IDisposable
     private interface IMMDeviceEnumerator
     {
         [PreserveSig]
-        int EnumAudioEndpoints(EDataFlow dataFlow, int stateMask, out IMMDeviceCollection devices);
+        int EnumAudioEndpoints(EDataFlow dataFlow, int stateMask, out IntPtr devices);
 
         [PreserveSig]
         int GetDefaultAudioEndpoint(EDataFlow dataFlow, ERole role, out IMMDevice endpoint);
@@ -244,7 +362,7 @@ public sealed class CoreAudioMeter : IDisposable
         int GetCount(out int count);
 
         [PreserveSig]
-        int Item(int index, out IMMDevice device);
+        int Item(int index, out IntPtr device);
     }
 
     [ComImport]

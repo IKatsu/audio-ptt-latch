@@ -8,7 +8,7 @@ public sealed class AudioEndpoint
     /// <summary>
     /// Creates a display-friendly wrapper around the endpoint ID returned by Core Audio.
     /// </summary>
-    public AudioEndpoint(string id, string name, AudioDeviceKind kind)
+    public AudioEndpoint(string? id, string name, AudioDeviceKind kind)
     {
         Id = id;
         Name = name;
@@ -18,7 +18,7 @@ public sealed class AudioEndpoint
     /// <summary>
     /// Stable Windows endpoint identifier used to re-open the selected device later.
     /// </summary>
-    public string Id { get; }
+    public string? Id { get; }
 
     /// <summary>
     /// Friendly device name as shown in Windows sound settings.

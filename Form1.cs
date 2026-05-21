@@ -311,7 +311,15 @@ public sealed class Form1 : Form
         catch (Exception ex)
         {
             _statusLabel.Text = "Status: failed to start";
-            MessageBox.Show(this, ex.Message, "Audio PTT Latch", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            var deviceName = _deviceCombo.SelectedItem is AudioEndpoint selected
+                ? selected.Name
+                : "default device";
+            MessageBox.Show(
+                this,
+                $"Could not start monitoring {_settings.DeviceKind} device '{deviceName}'.\n\n{ex.Message}",
+                "Audio PTT Latch",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
         }
     }
 
@@ -331,13 +339,20 @@ public sealed class Form1 : Form
         IReadOnlyList<AudioEndpoint> endpoints;
         try
         {
-            endpoints = CoreAudioMeter.Enumerate(kind);
+            endpoints = new[]
+            {
+                new AudioEndpoint(null, kind == AudioDeviceKind.Input ? "Default input device" : "Default output device", kind)
+            }
+            .Concat(CoreAudioMeter.Enumerate(kind))
+            .ToArray();
         }
         catch (Exception ex)
         {
-            _statusLabel.Text = "Status: device enumeration failed";
-            MessageBox.Show(this, ex.Message, "Audio PTT Latch", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
+            endpoints =
+            [
+                new AudioEndpoint(null, kind == AudioDeviceKind.Input ? "Default input device" : "Default output device", kind)
+            ];
+            _statusLabel.Text = $"Status: using default device only ({ex.Message})";
         }
 
         foreach (var endpoint in endpoints)
@@ -347,7 +362,7 @@ public sealed class Form1 : Form
 
         // Prefer the saved endpoint, then the Windows default endpoint, then the
         // first active endpoint so the app remains usable after device changes.
-        var desiredId = kind == _settings.DeviceKind ? _settings.DeviceId : CoreAudioMeter.GetDefaultDeviceId(kind);
+        var desiredId = kind == _settings.DeviceKind ? _settings.DeviceId : null;
         var selected = endpoints.FirstOrDefault(device => device.Id == desiredId) ?? endpoints.FirstOrDefault();
         if (selected != null)
         {

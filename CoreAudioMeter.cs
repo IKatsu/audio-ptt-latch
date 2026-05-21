@@ -27,15 +27,15 @@ public sealed class CoreAudioMeter : IDisposable
 
         try
         {
-            enumerator.EnumAudioEndpoints(ToFlow(kind), DeviceStateActive, out collection);
-            collection.GetCount(out var count);
+            ThrowIfFailed(enumerator.EnumAudioEndpoints(ToFlow(kind), DeviceStateActive, out collection));
+            ThrowIfFailed(collection.GetCount(out var count));
 
             for (var i = 0; i < count; i++)
             {
-                collection.Item(i, out var device);
+                ThrowIfFailed(collection.Item(i, out var device));
                 try
                 {
-                    device.GetId(out var id);
+                    ThrowIfFailed(device.GetId(out var id));
                     results.Add(new AudioEndpoint(id, ReadFriendlyName(device), kind));
                 }
                 finally
@@ -65,10 +65,10 @@ public sealed class CoreAudioMeter : IDisposable
         var enumerator = CreateEnumerator();
         try
         {
-            enumerator.GetDefaultAudioEndpoint(ToFlow(kind), ERole.eConsole, out var device);
+            ThrowIfFailed(enumerator.GetDefaultAudioEndpoint(ToFlow(kind), ERole.eConsole, out var device));
             try
             {
-                device.GetId(out var id);
+                ThrowIfFailed(device.GetId(out var id));
                 return id;
             }
             finally
@@ -100,17 +100,17 @@ public sealed class CoreAudioMeter : IDisposable
         {
             if (string.IsNullOrWhiteSpace(deviceId))
             {
-                enumerator.GetDefaultAudioEndpoint(ToFlow(kind), ERole.eConsole, out _device);
+                ThrowIfFailed(enumerator.GetDefaultAudioEndpoint(ToFlow(kind), ERole.eConsole, out _device));
             }
             else
             {
-                enumerator.GetDevice(deviceId, out _device);
+                ThrowIfFailed(enumerator.GetDevice(deviceId, out _device));
             }
 
             var meterId = IID_IAudioMeterInformation;
             // IAudioMeterInformation exposes a simple 0..1 peak level for render
             // and capture endpoints without starting our own audio stream.
-            _device.Activate(ref meterId, CLSCTX.CLSCTX_ALL, IntPtr.Zero, out var meter);
+            ThrowIfFailed(_device.Activate(ref meterId, CLSCTX.CLSCTX_ALL, IntPtr.Zero, out var meter));
             _meter = (IAudioMeterInformation)meter;
         }
         finally
@@ -131,7 +131,7 @@ public sealed class CoreAudioMeter : IDisposable
 
         try
         {
-            _meter.GetPeakValue(out var value);
+            ThrowIfFailed(_meter.GetPeakValue(out var value));
             return value;
         }
         catch
@@ -176,16 +176,27 @@ public sealed class CoreAudioMeter : IDisposable
     }
 
     /// <summary>
+    /// Converts Core Audio HRESULT failures into regular .NET exceptions at the call site.
+    /// </summary>
+    private static void ThrowIfFailed(int hresult)
+    {
+        if (hresult < 0)
+        {
+            Marshal.ThrowExceptionForHR(hresult);
+        }
+    }
+
+    /// <summary>
     /// Reads the friendly display name for a Core Audio endpoint.
     /// </summary>
     private static string ReadFriendlyName(IMMDevice device)
     {
-        device.OpenPropertyStore(STGM.STGM_READ, out var store);
+        ThrowIfFailed(device.OpenPropertyStore(STGM.STGM_READ, out var store));
         try
         {
             // PKEY_Device_FriendlyName is the same name Windows shows in Sound settings.
             var key = PropertyKeys.DeviceFriendlyName;
-            store.GetValue(ref key, out var value);
+            ThrowIfFailed(store.GetValue(ref key, out var value));
             try
             {
                 return value.ValueAsString() ?? "Unknown device";
@@ -208,11 +219,20 @@ public sealed class CoreAudioMeter : IDisposable
     // here, avoiding a third-party wrapper package.
     private interface IMMDeviceEnumerator
     {
-        void EnumAudioEndpoints(EDataFlow dataFlow, int stateMask, out IMMDeviceCollection devices);
-        void GetDefaultAudioEndpoint(EDataFlow dataFlow, ERole role, out IMMDevice endpoint);
-        void GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IMMDevice device);
-        void RegisterEndpointNotificationCallback(IntPtr client);
-        void UnregisterEndpointNotificationCallback(IntPtr client);
+        [PreserveSig]
+        int EnumAudioEndpoints(EDataFlow dataFlow, int stateMask, out IMMDeviceCollection devices);
+
+        [PreserveSig]
+        int GetDefaultAudioEndpoint(EDataFlow dataFlow, ERole role, out IMMDevice endpoint);
+
+        [PreserveSig]
+        int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IMMDevice device);
+
+        [PreserveSig]
+        int RegisterEndpointNotificationCallback(IntPtr client);
+
+        [PreserveSig]
+        int UnregisterEndpointNotificationCallback(IntPtr client);
     }
 
     [ComImport]
@@ -220,8 +240,11 @@ public sealed class CoreAudioMeter : IDisposable
     [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IMMDeviceCollection
     {
-        void GetCount(out int count);
-        void Item(int index, out IMMDevice device);
+        [PreserveSig]
+        int GetCount(out int count);
+
+        [PreserveSig]
+        int Item(int index, out IMMDevice device);
     }
 
     [ComImport]
@@ -229,11 +252,18 @@ public sealed class CoreAudioMeter : IDisposable
     [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IMMDevice
     {
-        void Activate(ref Guid iid, CLSCTX clsCtx, IntPtr activationParams,
+        [PreserveSig]
+        int Activate(ref Guid iid, CLSCTX clsCtx, IntPtr activationParams,
             [MarshalAs(UnmanagedType.IUnknown)] out object interfacePointer);
-        void OpenPropertyStore(STGM access, out IPropertyStore properties);
-        void GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
-        void GetState(out int state);
+
+        [PreserveSig]
+        int OpenPropertyStore(STGM access, out IPropertyStore properties);
+
+        [PreserveSig]
+        int GetId([MarshalAs(UnmanagedType.LPWStr)] out string id);
+
+        [PreserveSig]
+        int GetState(out int state);
     }
 
     [ComImport]
@@ -241,11 +271,20 @@ public sealed class CoreAudioMeter : IDisposable
     [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IPropertyStore
     {
-        void GetCount(out int propertyCount);
-        void GetAt(int propertyIndex, out PROPERTYKEY key);
-        void GetValue(ref PROPERTYKEY key, out PROPVARIANT value);
-        void SetValue(ref PROPERTYKEY key, ref PROPVARIANT value);
-        void Commit();
+        [PreserveSig]
+        int GetCount(out int propertyCount);
+
+        [PreserveSig]
+        int GetAt(int propertyIndex, out PROPERTYKEY key);
+
+        [PreserveSig]
+        int GetValue(ref PROPERTYKEY key, out PROPVARIANT value);
+
+        [PreserveSig]
+        int SetValue(ref PROPERTYKEY key, ref PROPVARIANT value);
+
+        [PreserveSig]
+        int Commit();
     }
 
     [ComImport]
@@ -253,10 +292,17 @@ public sealed class CoreAudioMeter : IDisposable
     [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     private interface IAudioMeterInformation
     {
-        void GetPeakValue(out float peak);
-        void GetMeteringChannelCount(out int channelCount);
-        void GetChannelsPeakValues(int channelCount, [Out] float[] peakValues);
-        void QueryHardwareSupport(out int hardwareSupportMask);
+        [PreserveSig]
+        int GetPeakValue(out float peak);
+
+        [PreserveSig]
+        int GetMeteringChannelCount(out int channelCount);
+
+        [PreserveSig]
+        int GetChannelsPeakValues(int channelCount, [Out] float[] peakValues);
+
+        [PreserveSig]
+        int QueryHardwareSupport(out int hardwareSupportMask);
     }
 
     private enum EDataFlow

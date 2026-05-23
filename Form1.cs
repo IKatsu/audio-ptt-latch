@@ -16,6 +16,7 @@ public sealed class Form1 : Form
     private ComboBox _deviceCombo = null!;
     private Button _keyButton = null!;
     private NumericUpDown _thresholdInput = null!;
+    private NumericUpDown _silenceDurationInput = null!;
     private NumericUpDown _releaseDelayInput = null!;
     private CheckBox _enabledCheck = null!;
     private CheckBox _minimizeToTrayCheck = null!;
@@ -116,14 +117,14 @@ public sealed class Form1 : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 10,
+            RowCount = 11,
             Padding = new Padding(18),
             AutoSize = false
         };
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
         root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
 
-        for (var i = 0; i < 8; i++)
+        for (var i = 0; i < 9; i++)
         {
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
         }
@@ -169,6 +170,16 @@ public sealed class Form1 : Form
         };
         AddRow(root, "Activity threshold", _thresholdInput, 4);
 
+        _silenceDurationInput = new NumericUpDown
+        {
+            Minimum = 0,
+            Maximum = 10000,
+            Increment = 25,
+            Dock = DockStyle.Left,
+            Width = 110
+        };
+        AddRow(root, "Silence duration (ms)", _silenceDurationInput, 5);
+
         _releaseDelayInput = new NumericUpDown
         {
             Minimum = 0,
@@ -177,13 +188,13 @@ public sealed class Form1 : Form
             Dock = DockStyle.Left,
             Width = 110
         };
-        AddRow(root, "Release delay (ms)", _releaseDelayInput, 5);
+        AddRow(root, "Release delay (ms)", _releaseDelayInput, 6);
 
         _minimizeToTrayCheck = new CheckBox { Text = "Minimize to notification area", AutoSize = true };
-        root.Controls.Add(_minimizeToTrayCheck, 1, 6);
+        root.Controls.Add(_minimizeToTrayCheck, 1, 7);
 
         _levelBar = new ProgressBar { Minimum = 0, Maximum = 1000, Dock = DockStyle.Fill };
-        AddRow(root, "Current level", _levelBar, 7);
+        AddRow(root, "Current level", _levelBar, 8);
 
         var statusPanel = new FlowLayoutPanel
         {
@@ -195,7 +206,7 @@ public sealed class Form1 : Form
         _deviceLabel = new Label { AutoSize = true, Text = "Device: none" };
         statusPanel.Controls.Add(_statusLabel);
         statusPanel.Controls.Add(_deviceLabel);
-        root.Controls.Add(statusPanel, 1, 8);
+        root.Controls.Add(statusPanel, 1, 9);
 
         var buttons = new FlowLayoutPanel
         {
@@ -212,10 +223,13 @@ public sealed class Form1 : Form
         };
         var hideButton = new Button { Text = "Hide", Width = 88, Height = 30 };
         hideButton.Click += (_, _) => MinimizeToTray();
+        var testButton = new Button { Text = "Test key", Width = 88, Height = 30 };
+        testButton.Click += (_, _) => TestConfiguredKey();
         buttons.Controls.Add(saveButton);
         buttons.Controls.Add(applyButton);
+        buttons.Controls.Add(testButton);
         buttons.Controls.Add(hideButton);
-        root.Controls.Add(buttons, 0, 9);
+        root.Controls.Add(buttons, 0, 10);
         root.SetColumnSpan(buttons, 2);
 
         Controls.Add(root);
@@ -259,6 +273,7 @@ public sealed class Form1 : Form
         _enabledCheck.Checked = _settings.Enabled;
         _deviceKindCombo.SelectedItem = _settings.DeviceKind;
         _thresholdInput.Value = (decimal)Math.Clamp(_settings.ActivityThreshold, 0.001f, 1f);
+        _silenceDurationInput.Value = Math.Clamp(_settings.SilenceDurationMs, 0, 10000);
         _releaseDelayInput.Value = Math.Clamp(_settings.ReleaseDelayMs, 0, 5000);
         _minimizeToTrayCheck.Checked = _settings.MinimizeToTray;
         _keyButton.Text = ((Keys)_settings.ActivationKey).ToString();
@@ -282,6 +297,7 @@ public sealed class Form1 : Form
 
         _settings.Enabled = _enabledCheck.Checked;
         _settings.ActivityThreshold = (float)_thresholdInput.Value;
+        _settings.SilenceDurationMs = (int)_silenceDurationInput.Value;
         _settings.ReleaseDelayMs = (int)_releaseDelayInput.Value;
         _settings.MinimizeToTray = _minimizeToTrayCheck.Checked;
 
@@ -386,6 +402,30 @@ public sealed class Form1 : Form
     }
 
     /// <summary>
+    /// Sends one configured key press so the user can validate SendInput in Notepad or another target app.
+    /// </summary>
+    private void TestConfiguredKey()
+    {
+        _statusLabel.Text = "Status: test key sends in 2 seconds";
+        var timer = new System.Windows.Forms.Timer { Interval = 2000 };
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            timer.Dispose();
+
+            try
+            {
+                KeySender.SendKeyPress((Keys)_settings.ActivationKey);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "Audio PTT Latch", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        };
+        timer.Start();
+    }
+
+    /// <summary>
     /// Updates status text and the live level meter when the controller reports changes.
     /// </summary>
     private void OnControllerStateChanged(object? sender, EventArgs e)
@@ -404,7 +444,9 @@ public sealed class Form1 : Form
         }
         else if (_controller.IsLatched)
         {
-            _statusLabel.Text = "Status: latched, waiting for silence";
+            _statusLabel.Text = string.IsNullOrWhiteSpace(_controller.LastInputError)
+                ? "Status: latched, waiting for silence"
+                : $"Status: input send failed ({_controller.LastInputError})";
         }
         else
         {

@@ -7,6 +7,8 @@ namespace AudioPttLatch;
 /// </summary>
 public sealed class LatchController : IDisposable
 {
+    private static readonly TimeSpan SyntheticKeyDownRefreshInterval = TimeSpan.FromMilliseconds(50);
+
     // KeyboardHook owns the global low-level keyboard callback.
     private readonly KeyboardHook _keyboardHook = new();
 
@@ -20,7 +22,7 @@ public sealed class LatchController : IDisposable
     // True only while the user's physical PTT key is still held down.
     private bool _physicalKeyDown;
 
-    // True after a physical key-up was swallowed and before our synthetic key-up is sent.
+    // True after the physical key was released and synthetic hold is active.
     private bool _latched;
 
     // Timestamp for when audio first dropped below threshold during a latch.
@@ -28,6 +30,12 @@ public sealed class LatchController : IDisposable
 
     // Last endpoint peak value read from Core Audio, exposed to the UI level meter.
     private float _lastPeak;
+
+    // Last time a synthetic key-down was sent while latched.
+    private DateTime _lastSyntheticKeyDown = DateTime.MinValue;
+
+    // Last synthetic-input error, surfaced to the UI without crashing timer callbacks.
+    private string? _lastInputError;
 
     /// <summary>
     /// Creates the controller and wires keyboard/audio polling callbacks.
@@ -60,6 +68,11 @@ public sealed class LatchController : IDisposable
     /// Most recent 0..1 peak level from the selected audio endpoint.
     /// </summary>
     public float LastPeak => _lastPeak;
+
+    /// <summary>
+    /// Last SendInput error seen while trying to maintain the synthetic hold.
+    /// </summary>
+    public string? LastInputError => _lastInputError;
 
     /// <summary>
     /// Opens the selected audio device, installs the keyboard hook, and starts polling.
@@ -134,7 +147,7 @@ public sealed class LatchController : IDisposable
     }
 
     /// <summary>
-    /// Decides whether the configured physical key-up should pass through or be latched.
+    /// Starts a synthetic hold if audio is still active when the physical key is released.
     /// </summary>
     private void OnKeyUp(object? sender, KeyboardHookEventArgs e)
     {
@@ -146,10 +159,11 @@ public sealed class LatchController : IDisposable
         _physicalKeyDown = false;
         if (IsAudioActive())
         {
-            // The key-down already reached the game. Suppress the physical key-up
-            // so push-to-talk remains active while the voice changer finishes output.
+            // Let the real key-up reach the game, then take over with synthetic
+            // key-down events. This avoids relying on hook suppression semantics,
+            // which some games or input paths do not honor consistently.
             _latched = true;
-            e.Handled = true;
+            BeginSyntheticHold();
             StateChanged?.Invoke(this, EventArgs.Empty);
         }
     }
@@ -171,15 +185,22 @@ public sealed class LatchController : IDisposable
 
         if (_physicalKeyDown || IsAudioActive())
         {
+            if (!_physicalKeyDown)
+            {
+                KeepLatchedKeyDown(force: false);
+            }
+
             _silentSince = null;
             StateChanged?.Invoke(this, EventArgs.Empty);
             return;
         }
 
-        // Silence must remain below threshold for the configured delay before the
-        // synthetic key-up is sent. Brief gaps in speech should not release PTT.
+        // Silence must remain below threshold long enough to count as intentional
+        // quiet, then the optional release delay is applied.
         _silentSince ??= DateTime.UtcNow;
-        if ((DateTime.UtcNow - _silentSince.Value).TotalMilliseconds >= _settings.ReleaseDelayMs)
+        KeepLatchedKeyDown(force: false);
+        var quietDurationMs = _settings.SilenceDurationMs + _settings.ReleaseDelayMs;
+        if ((DateTime.UtcNow - _silentSince.Value).TotalMilliseconds >= quietDurationMs)
         {
             ReleaseIfLatched();
         }
@@ -193,7 +214,50 @@ public sealed class LatchController : IDisposable
     private bool IsAudioActive() => _lastPeak >= Math.Clamp(_settings.ActivityThreshold, 0.001f, 1f);
 
     /// <summary>
-    /// Sends the synthetic key-up that completes a previously suppressed physical key-up.
+    /// Queues the first synthetic key-down after the physical key-up has been allowed through.
+    /// </summary>
+    private void BeginSyntheticHold()
+    {
+        _lastSyntheticKeyDown = DateTime.MinValue;
+        var timer = new System.Windows.Forms.Timer { Interval = 1 };
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            timer.Dispose();
+            if (_latched && !_physicalKeyDown)
+            {
+                KeepLatchedKeyDown(force: true);
+            }
+        };
+        timer.Start();
+    }
+
+    /// <summary>
+    /// Sends or refreshes the synthetic key-down while the latch is active.
+    /// </summary>
+    private void KeepLatchedKeyDown(bool force)
+    {
+        var now = DateTime.UtcNow;
+        if (!force && now - _lastSyntheticKeyDown < SyntheticKeyDownRefreshInterval)
+        {
+            return;
+        }
+
+        try
+        {
+            KeySender.SendKeyDown((Keys)_settings.ActivationKey);
+            _lastSyntheticKeyDown = now;
+            _lastInputError = null;
+        }
+        catch (Exception ex)
+        {
+            _lastInputError = ex.Message;
+            StateChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    /// <summary>
+    /// Sends the synthetic key-up that ends the artificial hold.
     /// </summary>
     private void ReleaseIfLatched()
     {
@@ -203,9 +267,19 @@ public sealed class LatchController : IDisposable
         }
 
         // This completes the suppressed physical key-up from OnKeyUp.
-        KeySender.SendKeyUp((Keys)_settings.ActivationKey);
+        try
+        {
+            KeySender.SendKeyUp((Keys)_settings.ActivationKey);
+            _lastInputError = null;
+        }
+        catch (Exception ex)
+        {
+            _lastInputError = ex.Message;
+        }
+
         _latched = false;
         _silentSince = null;
+        _lastSyntheticKeyDown = DateTime.MinValue;
         StateChanged?.Invoke(this, EventArgs.Empty);
     }
 }

@@ -37,7 +37,12 @@ public sealed class AppSettings
     public float ActivityThreshold { get; set; } = 0.02f;
 
     /// <summary>
-    /// Milliseconds to wait after audio falls below threshold before releasing the latched key.
+    /// Milliseconds audio must remain below threshold before speech is considered finished.
+    /// </summary>
+    public int SilenceDurationMs { get; set; } = 250;
+
+    /// <summary>
+    /// Extra milliseconds to wait after sustained silence before releasing the latched key.
     /// </summary>
     public int ReleaseDelayMs { get; set; } = 100;
 
